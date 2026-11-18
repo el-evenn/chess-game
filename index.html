@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Javascript chess game</title>
+    <style>
+        #game {
+            display: grid;
+            grid-template-columns: 24px repeat(8, 60px);
+            grid-auto-rows: 60px;
+            width: max-content;
+        }
+        .gamecell {
+            background: #f0d9b5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 44px;
+            user-select: none;
+            cursor: pointer;
+        }
+        .gamecell.grey { background: #b58863; }
+        .gamecell.selected { box-shadow: inset 0 0 0 4px #f6e05e; }
+        .cellprefix {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: sans-serif;
+        }
+        .piece-white { color: #fff; text-shadow: 0 0 2px #000, 0 0 2px #000, 0 0 2px #000; }
+        .piece-black { color: #000; }
+        #status.over { font-weight: bold; font-size: 20px; color: #2f855a; }
+        #promotion { display: none; margin-bottom: 8px; }
+        .promo-btn {
+            font-size: 36px;
+            width: 56px;
+            height: 56px;
+            margin-right: 6px;
+            background: #b58863;
+            border: 2px solid #5c4033;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        #newgame { font-family: sans-serif; padding: 6px 12px; margin-bottom: 8px; cursor: pointer; }
+    </style>
+</head>
+<body>
+<div id="status" style="font-family: sans-serif; margin-bottom: 8px;">White to move</div>
+<div id="promotion"></div>
+<button id="newgame">New game</button>
+<div id="game"></div>
+
+<script>
+   //build the board itself
+    const game = document.getElementById("game");
+    const files = "abcdefgh";
+
+    for (let row = 8; row >= 1; row--) {
+        game.insertAdjacentHTML("beforeend", `<div class="cellprefix">${row}</div>`);
+        for (let col = 1; col <= 8; col++) {
+            const grey = (col + row) % 2 === 0 ? " grey" : "";//use a loop to build the board plus color every other square grey
+            game.insertAdjacentHTML("beforeend",
+                `<div class="gamecell${grey}" id="${col}_${row}"></div>`);
+        }
+    }
+    game.insertAdjacentHTML("beforeend", `<div class="cellprefix"></div>`);
+    for (const f of files) {
+        game.insertAdjacentHTML("beforeend", `<div class="cellprefix">${f}</div>`);
+    }
+
+    //define the Unicode glyphs for each piece
+    const GLYPHS = {
+        king:   "\u265A",
+        queen:  "\u265B",
+        rook:   "\u265C",
+        bishop: "\u265D",
+        knight: "\u265E",
+        pawn:   "\u265F\uFE0E"//done so that the pawn doesn't have a color variant, since it is the same for both black and white
+    };
+
+    const BACK_RANK = ["rook", "knight", "bishop", "queen", "king", "bishop", "knight", "rook"];
+
+    //create a data structure to hold the board state
+    const board = {};   // keys match the cell ids, e.g. board["5_1"]
+
+    //remembers which square is currently selected (null means nothing is selected)
+    let selected = null;
+    //tracks whose turn it is to play
+    let currentTurn = "white";
+
+    //the square a pawn skipped over on its double step (e.g. "5_3"), capturable en passant for ONE move only
+    let enPassantTarget = null;
+
+    //null while the game is running, otherwise "checkmate" or "stalemate"
+    let gameResult = null;
+
+    //the square of a pawn that has reached the last row and is waiting for the player to pick its new piece (null = none waiting)
+    let pendingPromotion = null;
+
+    //the pieces a pawn can be promoted to
+    const PROMO_TYPES = ["queen", "rook", "bishop", "knight"];
+
+    //build the promotion picker: one button per piece type
+    const promoBox = document.getElementById("promotion");
+    PROMO_TYPES.forEach(type => {
+        const btn = document.createElement("button");
+        btn.className = "promo-btn";
+        btn.textContent = GLYPHS[type];
+        btn.addEventListener("click", () => choosePromotion(type));
+        promoBox.appendChild(btn);
+    });
+
+    function setupBoard() {
+        for (let col = 1; col <= 8; col++) {
+            board[`${col}_1`] = { type: BACK_RANK[col - 1], color: "white" };//back_rank is the piece order for the back row. Board is the game state
+            board[`${col}_2`] = { type: "pawn", color: "white" };
+            board[`${col}_7`] = { type: "pawn", color: "black" };
+            board[`${col}_8`] = { type: BACK_RANK[col - 1], color: "black" };
+        }
+    }
+
+    //render the pieces on the board
+    function renderPieces() {
+        document.querySelectorAll(".gamecell").forEach(cell => {
+            const piece = board[cell.id];
+            cell.textContent = piece ? GLYPHS[piece.type] : "";
+            cell.classList.remove("piece-white", "piece-black");
+            if (piece) cell.classList.add(`piece-${piece.color}`);
+            cell.classList.toggle("selected", cell.id === selected);//highlight the selected square and clear it from all the others
+        });
+        updateStatus();
+    }
+
+    //show whose turn it is, a check warning, the promotion picker, or the final result with the winner
+    function updateStatus() {
+        const status = document.getElementById("status");
+        const name = currentTurn === "white" ? "White" : "Black";
+        const winner = currentTurn === "white" ? "Black" : "White";//the side NOT to move is the one that delivered mate
+        let text;
+        if (pendingPromotion) text = `${name}: choose a piece to promote your pawn to`;
+        else if (gameResult === "checkmate") text = `Checkmate! ${winner} wins`;
+        else if (gameResult === "stalemate") text = "Stalemate - it's a draw";
+        else text = `${name} to move` + (isInCheck(currentTurn) ? " - check!" : "");
+        status.textContent = text;
+        status.classList.toggle("over", gameResult !== null);//make the final result stand out
+
+        //only show the picker while a promotion is pending, and color its pieces like the pawn's side
+        promoBox.style.display = pendingPromotion ? "block" : "none";
+        if (pendingPromotion) {
+            const color = board[pendingPromotion].color;
+            promoBox.querySelectorAll(".promo-btn").forEach(btn => {
+                btn.classList.remove("piece-white", "piece-black");
+                btn.classList.add(`piece-${color}`);
+            });
+        }
+    }
+
+    //move a piece by changing the board data, the page is redrawn afterwards
+    function movePiece(from, to) {
+        const piece = board[from];
+        const a = parseId(from), b = parseId(to);
+
+        //en passant: a pawn moving diagonally onto an EMPTY square can only be en passant, so remove the pawn beside it
+        if (piece.type === "pawn" && a.col !== b.col && !board[to]) delete board[`${b.col}_${a.row}`];
+
+        //castling: a king moving two columns also moves the rook to the other side of it
+        if (piece.type === "king" && Math.abs(b.col - a.col) === 2) {
+            const rookFrom = b.col > a.col ? `8_${a.row}` : `1_${a.row}`;
+            const rookTo   = b.col > a.col ? `6_${a.row}` : `4_${a.row}`;
+            board[rookTo] = board[rookFrom];
+            board[rookTo].moved = true;
+            delete board[rookFrom];
+        }
+
+        board[to] = piece;//copy the piece to the destination (this overwrites any piece there, which is a capture)
+        delete board[from];     //the origin square is now empty
+        piece.moved = true;     //remembered so castling can check that the king and rook never moved
+
+        //after a pawn's double step, record the skipped square. every other move clears it
+        enPassantTarget = (piece.type === "pawn" && Math.abs(b.row - a.row) === 2)
+            ? `${a.col}_${(a.row + b.row) / 2}` : null;
+    }
+
+    //hand the turn to the other player, then see if that player is checkmated or stalemated
+    function endTurn() {
+        currentTurn = currentTurn === "white" ? "black" : "white";//hand the turn to the other player
+        //the new player to move is stuck? then it's checkmate (if in check) or stalemate (if not)
+        if (!hasAnyLegalMove(currentTurn)) gameResult = isInCheck(currentTurn) ? "checkmate" : "stalemate";
+    }
+
+    //called when the player clicks one of the promotion buttons
+    function choosePromotion(type) {
+        if (!pendingPromotion) return;
+        board[pendingPromotion].type = type;//the pawn becomes the chosen piece
+        pendingPromotion = null;
+        endTurn();//the turn only passes now, so checkmate is tested with the NEW piece on the board
+        renderPieces();
+    }
+
+    //reset everything back to the starting position
+    function newGame() {
+        for (const k of Object.keys(board)) delete board[k];//board is a const, so empty it instead of replacing it
+        selected = null;
+        currentTurn = "white";
+        enPassantTarget = null;
+        gameResult = null;
+        pendingPromotion = null;
+        setupBoard();
+        renderPieces();
+    }
+    document.getElementById("newgame").addEventListener("click", newGame);
+
+    //split an id like "5_2" into numbers: { col: 5, row: 2 }
+    function parseId(id) {
+        const [col, row] = id.split("_").map(Number);
+        return { col, row };
+    }
+
+    //true if every square between from and to is empty (only meaningful for straight/diagonal moves)
+    function pathClear(from, to) {
+        const a = parseId(from), b = parseId(to);
+        const stepCol = Math.sign(b.col - a.col);//-1, 0 or 1: which way to walk along the columns
+        const stepRow = Math.sign(b.row - a.row);//-1, 0 or 1: which way to walk along the rows
+        let col = a.col + stepCol, row = a.row + stepRow;//start one square past the origin
+        while (col !== b.col || row !== b.row) {//stop when we reach the destination (it is not checked here)
+            if (board[`${col}_${row}`]) return false;//a piece is in the way
+            col += stepCol;
+            row += stepRow;
+        }
+        return true;
+    }
+
+    //does the piece on "from" attack the square "to"? (pure geometry, ignores what is standing on "to")
+    function attacks(from, to) {
+        const piece = board[from];
+        const a = parseId(from), b = parseId(to);
+        const dc = b.col - a.col, dr = b.row - a.row;
+        const adc = Math.abs(dc), adr = Math.abs(dr);//absolute sizes, so direction doesn't matter
+
+        switch (piece.type) {
+            case "knight": return (adc === 1 && adr === 2) || (adc === 2 && adr === 1);
+            case "king":   return adc <= 1 && adr <= 1;
+            case "rook":   return (dc === 0 || dr === 0) && pathClear(from, to);
+            case "bishop": return adc === adr && pathClear(from, to);
+            case "queen":  return (dc === 0 || dr === 0 || adc === adr) && pathClear(from, to);
+            case "pawn":   return adc === 1 && dr === (piece.color === "white" ? 1 : -1);//pawns only attack diagonally forward
+        }
+        return false;
+    }
+
+    //can the king on "from" castle by moving to "to"? (to is two columns left or right)
+    function canCastle(from, to) {
+        const king = board[from];
+        const a = parseId(from), b = parseId(to);
+        if (king.moved) return false;
+        const rookSq = b.col > a.col ? `8_${a.row}` : `1_${a.row}`;
+        const rook = board[rookSq];
+        if (!rook || rook.type !== "rook" || rook.color !== king.color || rook.moved) return false;
+        if (!pathClear(from, rookSq)) return false;//squares between king and rook must be empty
+
+        const enemy = king.color === "white" ? "black" : "white";
+        const step = Math.sign(b.col - a.col);
+        if (isInCheck(king.color)) return false;                           //can't castle out of check
+        if (isAttacked(`${a.col + step}_${a.row}`, enemy)) return false;   //...or through an attacked square
+        return true;//(landing in check is rejected later by leavesKingInCheck)
+    }
+
+    //decides whether the piece on "from" is allowed to move to "to" (movement rules only, check is handled separately)
+    function isValidMove(from, to) {
+        const piece = board[from];
+        const target = board[to];
+        if (target && target.color === piece.color) return false;//never capture your own piece
+
+        const a = parseId(from), b = parseId(to);
+        const dc = b.col - a.col, dr = b.row - a.row;
+        const adc = Math.abs(dc), adr = Math.abs(dr);
+
+        if (piece.type === "pawn") {
+            const dir = piece.color === "white" ? 1 : -1;//white moves up the rows, black moves down
+            const startRow = piece.color === "white" ? 2 : 7;
+            if (dc === 0 && !target) {//straight ahead is only allowed onto an empty square
+                if (dr === dir) return true;
+                //two squares from the start row, and the square in between must be empty too
+                if (dr === 2 * dir && a.row === startRow && !board[`${a.col}_${a.row + dir}`]) return true;
+                return false;
+            }
+            //diagonal one step: a normal capture, or en passant onto the square that was skipped
+            return adc === 1 && dr === dir && (!!target || to === enPassantTarget);
+        }
+        if (piece.type === "king" && adr === 0 && adc === 2) return canCastle(from, to);
+        return attacks(from, to);
+    }
+
+    //is the given square attacked by any piece of the given color?
+    function isAttacked(square, byColor) {
+        for (const from of Object.keys(board)) {
+            if (board[from].color === byColor && attacks(from, square)) return true;
+        }
+        return false;
+    }
+
+    //is the king of this color currently in check?
+    function isInCheck(color) {
+        const kingSquare = Object.keys(board).find(k => board[k].type === "king" && board[k].color === color);
+        return isAttacked(kingSquare, color === "white" ? "black" : "white");
+    }
+
+    //try the move on the real board, ask "is my king attacked now?", then undo it
+    function leavesKingInCheck(from, to) {
+        const piece = board[from];
+        const captured = board[to];
+        const a = parseId(from), b = parseId(to);
+        //en passant: the captured pawn is beside the mover, not on the destination
+        const epSquare = (piece.type === "pawn" && !captured && a.col !== b.col) ? `${b.col}_${a.row}` : null;
+        const epPawn = epSquare ? board[epSquare] : undefined;
+
+        board[to] = piece; delete board[from]; if (epSquare) delete board[epSquare];
+        const inCheck = isInCheck(piece.color);
+
+        //undo everything
+        board[from] = piece;
+        if (captured) board[to] = captured; else delete board[to];
+        if (epSquare) board[epSquare] = epPawn;
+        return inCheck;
+    }
+
+    //a move is legal if the movement rules allow it AND it doesn't expose your own king
+    function isLegalMove(from, to) {
+        return isValidMove(from, to) && !leavesKingInCheck(from, to);
+    }
+
+    //does this color have at least one legal move anywhere on the board?
+    function hasAnyLegalMove(color) {
+        for (const from of Object.keys(board)) {//Object.keys gives a snapshot, so trying moves can't disturb the loop
+            if (board[from].color !== color) continue;
+            for (let col = 1; col <= 8; col++) {
+                for (let row = 1; row <= 8; row++) {
+                    if (isLegalMove(from, `${col}_${row}`)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    //handle clicks on the board
+    game.addEventListener("click", (e) => {
+        const cell = e.target.closest(".gamecell");//find the square that was clicked, ignores the row/file labels
+        if (!cell) return;
+        if (gameResult || pendingPromotion) return;//the game is over, or a promotion piece must be chosen first: ignore board clicks
+        const id = cell.id;
+        const clickedPiece = board[id];
+
+        if (selected === null) {
+            //nothing selected yet: only squares that hold a piece of the player whose turn it is can be selected
+            if (clickedPiece && clickedPiece.color === currentTurn) selected = id;
+        } else if (id === selected) {
+            //clicking the selected square again cancels the selection
+            selected = null;
+        } else if (clickedPiece && clickedPiece.color === board[selected].color) {
+            //clicking another piece of the same color switches the selection to it - stops you from capturing your own pieces
+            selected = id;
+        } else {
+            //empty square or enemy piece: move there, but only if the rules allow it
+            if (isLegalMove(selected, id)) {
+                const movedPiece = board[selected];
+                movePiece(selected, id);
+                selected = null;
+                const lastRow = parseId(id).row;
+                if (movedPiece.type === "pawn" && (lastRow === 8 || lastRow === 1)) {
+                    pendingPromotion = id;//pause here: the turn passes after the player picks a piece
+                } else {
+                    endTurn();
+                }
+            }
+            //if the move is illegal nothing happens, and the piece stays selected so you can try another square
+        }
+        renderPieces();
+    });
+
+    setupBoard(); //fills the board data structure with the initial piece positions as in standard chess
+    renderPieces(); //renders the pieces on the board based on the board data structure
+</script>
+</body>
+</html>
